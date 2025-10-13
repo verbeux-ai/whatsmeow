@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1120,6 +1121,12 @@ func (cli *Client) prepareMessageNode(
 	timings.GetDevices = time.Since(start)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get device list: %w", err)
+	}
+
+	if to.Server == types.GroupServer {
+		allDevices = slices.DeleteFunc(allDevices, func(jid types.JID) bool {
+			return jid.Server == types.HostedServer || jid.Server == types.HostedLIDServer
+		})
 	}
 
 	msgType := getTypeFromMessage(message)
