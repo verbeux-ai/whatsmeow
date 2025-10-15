@@ -27,3 +27,5 @@ require (
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.29.0 // indirect
 )
+
+replace go.mau.fi/libsignal => github.com/purpshell/libsignal-protocol-go v0.0.0-20251006083005-783dd212302c
