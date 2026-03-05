@@ -40,8 +40,7 @@ import (
 
 var pbSerializer = store.SignalProtobufSerializer
 
-func (cli *Client) handleEncryptedMessage(node *waBinary.Node) {
-	ctx := cli.BackgroundEventCtx
+func (cli *Client) handleEncryptedMessage(ctx context.Context, node *waBinary.Node) {
 	info, err := cli.parseMessageInfo(node)
 	if err != nil {
 		cli.Log.Warnf("Failed to parse message: %v", err)
@@ -52,10 +51,10 @@ func (cli *Client) handleEncryptedMessage(node *waBinary.Node) {
 			cli.StoreLIDPNMapping(ctx, info.RecipientAlt, info.Chat)
 		}
 		if info.VerifiedName != nil && len(info.VerifiedName.Details.GetVerifiedName()) > 0 {
-			go cli.updateBusinessName(cli.BackgroundEventCtx, info.Sender, info, info.VerifiedName.Details.GetVerifiedName())
+			go cli.updateBusinessName(ctx, info.Sender, info.SenderAlt, info, info.VerifiedName.Details.GetVerifiedName())
 		}
 		if len(info.PushName) > 0 && info.PushName != "-" && (cli.MessengerConfig == nil || info.PushName != "username") {
-			go cli.updatePushName(cli.BackgroundEventCtx, info.Sender, info, info.PushName)
+			go cli.updatePushName(ctx, info.Sender, info.SenderAlt, info, info.PushName)
 		}
 		if info.Sender.Server == types.NewsletterServer {
 			var cancelled bool
@@ -303,7 +302,7 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 		cli.Log.Warnf("Unavailable message %s from %s (type: %q)", info.ID, info.SourceString(), uType)
 		cli.backgroundIfAsyncAck(func() {
 			cli.immediateRequestMessageFromPhone(ctx, info)
-			cli.sendAck(node, 0)
+			cli.sendAck(ctx, node, 0)
 		})
 		cli.dispatchEvent(&events.UndecryptableMessage{Info: *info, IsUnavailable: true, UnavailableType: uType})
 		return
@@ -394,15 +393,15 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 
 			if encType == "msmsg" {
 				cli.backgroundIfAsyncAck(func() {
-					cli.sendAck(node, NackMissingMessageSecret)
+					cli.sendAck(ctx, node, NackMissingMessageSecret)
 				})
 			} else if cli.SynchronousAck {
 				cli.sendRetryReceipt(ctx, node, info, isUnavailable, retryReason)
 				// TODO this probably isn't supposed to ack
-				cli.sendAck(node, 0)
+				cli.sendAck(ctx, node, 0)
 			} else {
 				go cli.sendRetryReceipt(context.WithoutCancel(ctx), node, info, isUnavailable, retryReason)
-				go cli.sendAck(node, 0)
+				go cli.sendAck(ctx, node, 0)
 			}
 			cli.dispatchEvent(&events.UndecryptableMessage{
 				Info:            *info,
@@ -463,11 +462,11 @@ func (cli *Client) decryptMessages(ctx context.Context, info *types.MessageInfo,
 	}
 	cli.backgroundIfAsyncAck(func() {
 		if !recognizedStanza {
-			cli.sendAck(node, NackUnrecognizedStanza)
+			cli.sendAck(ctx, node, NackUnrecognizedStanza)
 		} else if protobufFailed {
-			cli.sendAck(node, NackInvalidProtobuf)
+			cli.sendAck(ctx, node, NackInvalidProtobuf)
 		} else {
-			cli.sendMessageReceipt(info, node)
+			cli.sendMessageReceipt(ctx, info, node)
 		}
 	})
 	return
@@ -678,12 +677,17 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
 		}
 	}()
 	ctx := cli.BackgroundEventCtx
-	for notif := range cli.historySyncNotifications {
-		blob, err := cli.DownloadHistorySync(ctx, notif, false)
-		if err != nil {
-			cli.Log.Errorf("Failed to download history sync: %v", err)
-		} else {
-			cli.dispatchEvent(&events.HistorySync{Data: blob})
+	for {
+		select {
+		case notif := <-cli.historySyncNotifications:
+			blob, err := cli.DownloadHistorySync(ctx, notif, false)
+			if err != nil {
+				cli.Log.Errorf("Failed to download history sync: %v", err)
+			} else {
+				cli.dispatchEvent(&events.HistorySync{Data: blob})
+			}
+		case <-time.After(1 * time.Minute):
+			return
 		}
 	}
 }
@@ -693,37 +697,41 @@ func (cli *Client) handleHistorySyncNotificationLoop() {
 // You only need to call this manually if you set [Client.ManualHistorySyncDownload] to true.
 // By default, whatsmeow will call this automatically and dispatch an [events.HistorySync] with the parsed data.
 func (cli *Client) DownloadHistorySync(ctx context.Context, notif *waE2E.HistorySyncNotification, synchronousStorage bool) (*waHistorySync.HistorySync, error) {
-	var historySync waHistorySync.HistorySync
-	if data, err := cli.Download(ctx, notif); err != nil {
+	var data []byte
+	var err error
+	if notif.InitialHistBootstrapInlinePayload != nil {
+		data = notif.InitialHistBootstrapInlinePayload
+	} else if data, err = cli.Download(ctx, notif); err != nil {
 		return nil, fmt.Errorf("failed to download: %w", err)
-	} else if reader, err := zlib.NewReader(bytes.NewReader(data)); err != nil {
+	}
+	var historySync waHistorySync.HistorySync
+	if reader, err := zlib.NewReader(bytes.NewReader(data)); err != nil {
 		return nil, fmt.Errorf("failed to prepare to decompress: %w", err)
 	} else if rawData, err := io.ReadAll(reader); err != nil {
 		return nil, fmt.Errorf("failed to decompress: %w", err)
 	} else if err = proto.Unmarshal(rawData, &historySync); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal: %w", err)
-	} else {
-		cli.Log.Debugf("Received history sync (type %s, chunk %d, progress %d)", historySync.GetSyncType(), historySync.GetChunkOrder(), historySync.GetProgress())
-		doStorage := func(ctx context.Context) {
-			if historySync.GetSyncType() == waHistorySync.HistorySync_PUSH_NAME {
-				cli.handleHistoricalPushNames(ctx, historySync.GetPushnames())
-			} else if len(historySync.GetConversations()) > 0 {
-				cli.storeHistoricalMessageSecrets(ctx, historySync.GetConversations())
-			}
-			if len(historySync.GetPhoneNumberToLidMappings()) > 0 {
-				cli.storeHistoricalPNLIDMappings(ctx, historySync.GetPhoneNumberToLidMappings())
-			}
-			if historySync.GlobalSettings != nil {
-				cli.storeGlobalSettings(ctx, historySync.GlobalSettings)
-			}
-		}
-		if synchronousStorage {
-			doStorage(ctx)
-		} else {
-			go doStorage(context.WithoutCancel(ctx))
-		}
-		return &historySync, nil
 	}
+	cli.Log.Debugf("Received history sync (type %s, chunk %d, progress %d)", historySync.GetSyncType(), historySync.GetChunkOrder(), historySync.GetProgress())
+	doStorage := func(ctx context.Context) {
+		if historySync.GetSyncType() == waHistorySync.HistorySync_PUSH_NAME {
+			cli.handleHistoricalPushNames(ctx, historySync.GetPushnames())
+		} else if len(historySync.GetConversations()) > 0 {
+			cli.storeHistoricalMessageSecrets(ctx, historySync.GetConversations())
+		}
+		if len(historySync.GetPhoneNumberToLidMappings()) > 0 {
+			cli.storeHistoricalPNLIDMappings(ctx, historySync.GetPhoneNumberToLidMappings())
+		}
+		if historySync.GlobalSettings != nil {
+			cli.storeGlobalSettings(ctx, historySync.GlobalSettings)
+		}
+	}
+	if synchronousStorage {
+		doStorage(ctx)
+	} else {
+		go doStorage(context.WithoutCancel(ctx))
+	}
+	return &historySync, nil
 }
 
 func (cli *Client) handleAppStateSyncKeyShare(ctx context.Context, keys *waE2E.AppStateSyncKeyShare) {
@@ -777,7 +785,7 @@ func (cli *Client) handlePlaceholderResendResponse(msg *waE2E.PeerDataOperationR
 			cli.Log.Warnf("Failed to parse web message info in item #%d of response to %s: %v", i+1, reqID, err)
 		} else {
 			msgEvt.UnavailableRequestID = reqID
-			ok = cli.dispatchEvent(msgEvt) && ok
+			ok = !cli.dispatchEvent(msgEvt) && ok
 		}
 	}
 	return
@@ -798,15 +806,21 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
 				go cli.handleHistorySyncNotificationLoop()
 			}
 		}
-		go cli.sendProtocolMessageReceipt(info.ID, types.ReceiptTypeHistorySync)
+		go cli.sendProtocolMessageReceipt(ctx, info.ID, types.ReceiptTypeHistorySync)
 	}
 
 	if protoMsg.GetLidMigrationMappingSyncMessage() != nil {
 		cli.storeLIDSyncMessage(ctx, protoMsg.GetLidMigrationMappingSyncMessage().GetEncodedMappingPayload())
 	}
 
-	if protoMsg.GetPeerDataOperationRequestResponseMessage().GetPeerDataOperationRequestType() == waE2E.PeerDataOperationRequestType_PLACEHOLDER_MESSAGE_RESEND {
-		ok = cli.handlePlaceholderResendResponse(protoMsg.GetPeerDataOperationRequestResponseMessage()) && ok
+	if info.Sender.Device == 0 {
+		peerResp := protoMsg.GetPeerDataOperationRequestResponseMessage()
+		switch peerResp.GetPeerDataOperationRequestType() {
+		case waE2E.PeerDataOperationRequestType_PLACEHOLDER_MESSAGE_RESEND:
+			ok = cli.handlePlaceholderResendResponse(peerResp) && ok
+		case waE2E.PeerDataOperationRequestType_COMPANION_SYNCD_SNAPSHOT_FATAL_RECOVERY:
+			ok = cli.handleAppStateRecovery(ctx, peerResp.GetStanzaID(), peerResp.GetPeerDataOperationResult()) && ok
+		}
 	}
 
 	if protoMsg.GetAppStateSyncKeyShare() != nil {
@@ -814,7 +828,7 @@ func (cli *Client) handleProtocolMessage(ctx context.Context, info *types.Messag
 	}
 
 	if info.Category == "peer" {
-		go cli.sendProtocolMessageReceipt(info.ID, types.ReceiptTypePeerMsg)
+		go cli.sendProtocolMessageReceipt(ctx, info.ID, types.ReceiptTypePeerMsg)
 	}
 	return
 }
@@ -1018,7 +1032,7 @@ func (cli *Client) storeHistoricalPNLIDMappings(ctx context.Context, mappings []
 	}
 }
 
-func (cli *Client) handleDecryptedMessage(ctx context.Context, info *types.MessageInfo, msg *waE2E.Message, retryCount int) bool {
+func (cli *Client) handleDecryptedMessage(ctx context.Context, info *types.MessageInfo, msg *waE2E.Message, retryCount int) (handlerFailed bool) {
 	ok := cli.processProtocolParts(ctx, info, msg)
 	if !ok {
 		return false
@@ -1027,17 +1041,16 @@ func (cli *Client) handleDecryptedMessage(ctx context.Context, info *types.Messa
 	return cli.dispatchEvent(evt.UnwrapRaw())
 }
 
-func (cli *Client) sendProtocolMessageReceipt(id types.MessageID, msgType types.ReceiptType) {
-	clientID := cli.Store.ID
-	if len(id) == 0 || clientID == nil {
+func (cli *Client) sendProtocolMessageReceipt(ctx context.Context, id types.MessageID, msgType types.ReceiptType) {
+	if len(id) == 0 {
 		return
 	}
-	err := cli.sendNode(waBinary.Node{
+	err := cli.sendNode(ctx, waBinary.Node{
 		Tag: "receipt",
 		Attrs: waBinary.Attrs{
 			"id":   string(id),
 			"type": string(msgType),
-			"to":   types.NewJID(clientID.User, types.LegacyUserServer),
+			"to":   cli.getOwnID().ToNonAD(),
 		},
 		Content: nil,
 	})

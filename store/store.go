@@ -61,6 +61,7 @@ type AppStateSyncKeyStore interface {
 	PutAppStateSyncKey(ctx context.Context, id []byte, key AppStateSyncKey) error
 	GetAppStateSyncKey(ctx context.Context, id []byte) (*AppStateSyncKey, error)
 	GetLatestAppStateSyncKeyID(ctx context.Context) ([]byte, error)
+	GetAllAppStateSyncKeys(ctx context.Context) ([]*AppStateSyncKey, error)
 }
 
 type AppStateMutationMAC struct {
@@ -157,6 +158,10 @@ type EventBuffer interface {
 	DoDecryptionTxn(ctx context.Context, fn func(context.Context) error) error
 	ClearBufferedEventPlaintext(ctx context.Context, ciphertextHash [32]byte) error
 	DeleteOldBufferedHashes(ctx context.Context) error
+
+	GetOutgoingEvent(ctx context.Context, chatJID, altChatJID types.JID, id types.MessageID) (string, []byte, error)
+	AddOutgoingEvent(ctx context.Context, chatJID types.JID, id types.MessageID, format string, plaintext []byte) error
+	DeleteOldOutgoingEvents(ctx context.Context) error
 }
 
 type LIDMapping struct {
@@ -266,4 +271,16 @@ func (device *Device) Delete(ctx context.Context) error {
 	device.ID = nil
 	device.LID = types.EmptyJID
 	return nil
+}
+
+func (device *Device) GetAltJID(ctx context.Context, jid types.JID) (types.JID, error) {
+	if device == nil {
+		return types.EmptyJID, nil
+	} else if jid.Server == types.DefaultUserServer {
+		return device.LIDs.GetLIDForPN(ctx, jid)
+	} else if jid.Server == types.HiddenUserServer {
+		return device.LIDs.GetPNForLID(ctx, jid)
+	} else {
+		return types.EmptyJID, nil
+	}
 }
