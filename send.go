@@ -1268,7 +1268,7 @@ func (cli *Client) encryptMessageForDevices(
 		sessionAddresses = append(sessionAddresses, encryptionIdentity.SignalAddress().String())
 	}
 
-	existingSessions, err := cli.Store.Sessions.HasManySessions(ctx, sessionAddresses)
+	existingSessions, err := cli.Store.Sessions.GetManySessions(ctx, sessionAddresses)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to check which sessions exist: %w", err)
 	}
@@ -1300,7 +1300,7 @@ func (cli *Client) encryptMessageForDevices(
 			usyncJids = append(usyncJids, bare)
 		}
 
-		info, err := cli.GetUserInfo(usyncJids)
+		info, err := cli.GetUserInfo(ctx, usyncJids)
 		if err != nil {
 			cli.Log.Warnf("Failed to get LID info from USync, err: %v", err)
 		} else {
