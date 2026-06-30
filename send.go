@@ -1275,6 +1275,9 @@ func (cli *Client) encryptMessageForDevices(
 	encryptionIdentities := make(map[types.JID]types.JID, len(allDevices))
 	var sessionAddresses []string
 	for _, jid := range allDevices {
+		if jid == ownJID || jid == ownLID {
+			continue
+		}
 		encryptionIdentity := jid
 		if jid.Server == types.DefaultUserServer {
 			// TODO query LID from server for missing entries
@@ -1342,10 +1345,10 @@ func (cli *Client) encryptMessageForDevices(
 
 	for _, jid := range allDevices {
 		plaintext := msgPlaintext
+		if jid == ownJID || jid == ownLID {
+			continue
+		}
 		if (jid.User == ownJID.User || jid.User == ownLID.User) && dsmPlaintext != nil {
-			if jid == ownJID || jid == ownLID {
-				continue
-			}
 			plaintext = dsmPlaintext
 		}
 
