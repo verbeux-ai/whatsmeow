@@ -226,12 +226,14 @@ type incomingRetryKey struct {
 }
 
 func (cli *Client) tryHandleRetryReceipt(ctx context.Context, receipt *events.Receipt, node *waBinary.Node) {
+	var cancelled bool
 	defer func() {
 		err := recover()
 		if err != nil {
 			cli.Log.Errorf("Retry receipt handler panicked: %v\n%s", err, debug.Stack())
 		}
 	}()
+	defer cli.maybeDeferredAck(ctx, node)(&cancelled)
 	if cli.retrySema != nil {
 		err := cli.retrySema.Acquire(ctx, 1)
 		if err != nil {
@@ -242,6 +244,7 @@ func (cli *Client) tryHandleRetryReceipt(ctx context.Context, receipt *events.Re
 	err := cli.handleRetryReceipt(ctx, receipt, node)
 	if err != nil {
 		cli.Log.Errorf("Failed to handle retry receipt for %s/%s from %s: %v", receipt.Chat, receipt.MessageIDs[0], receipt.Sender, err)
+		cancelled = errors.Is(err, context.Canceled) || errors.Is(err, ErrNotConnected)
 	}
 }
 
