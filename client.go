@@ -141,6 +141,7 @@ type Client struct {
 
 	privacySettingsCache atomic.Value
 
+	groupDescriptionLock sync.Mutex
 	groupCache           map[types.JID]*groupMetaCache
 	groupCacheLock       sync.Mutex
 	userDevicesCache     map[types.JID]deviceCache

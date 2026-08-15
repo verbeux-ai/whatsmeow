@@ -52,6 +52,88 @@ func buildGroupDescriptionNode(description, previousID string, newID types.Messa
 	}
 }
 
+type groupDescriptionClient interface {
+	getGroupInfo(context.Context, types.JID, bool) (*types.GroupInfo, error)
+	sendGroupIQ(context.Context, infoQueryType, types.JID, waBinary.Node) (*waBinary.Node, error)
+	GenerateMessageID() types.MessageID
+}
+
+func resolveGroupDescriptionTarget(ctx context.Context, cli groupDescriptionClient, requestedJID types.JID) (types.JID, *types.GroupInfo, error) {
+	requestedInfo, err := cli.getGroupInfo(ctx, requestedJID, false)
+	if err != nil {
+		return types.EmptyJID, nil, fmt.Errorf("failed to get group info for description target %s: %w", requestedJID, err)
+	}
+	if !requestedInfo.IsDefaultSubGroup {
+		return requestedJID, requestedInfo, nil
+	}
+	if requestedInfo.LinkedParentJID.IsEmpty() {
+		return types.EmptyJID, nil, fmt.Errorf("community announcement group %s has no linked parent", requestedJID)
+	}
+
+	parentJID := requestedInfo.LinkedParentJID
+	parentInfo, err := cli.getGroupInfo(ctx, parentJID, false)
+	if err != nil {
+		return types.EmptyJID, nil, fmt.Errorf("failed to get parent community info %s for announcement group %s: %w", parentJID, requestedJID, err)
+	}
+	if !parentInfo.IsParent {
+		return types.EmptyJID, nil, fmt.Errorf("linked parent %s of community announcement group %s is not a community parent", parentJID, requestedJID)
+	}
+	return parentJID, parentInfo, nil
+}
+
+func generateGroupDescriptionID(cli groupDescriptionClient, groupInfo *types.GroupInfo, description string) types.MessageID {
+	if description == "" {
+		return ""
+	}
+	if groupInfo.IsParent {
+		return generateCommunityDescriptionID()
+	}
+	return cli.GenerateMessageID()
+}
+
+func isIQErrorCode(err error, code int) bool {
+	var iqErr *IQError
+	return errors.As(err, &iqErr) && iqErr.Code == code
+}
+
+func setGroupDescription(ctx context.Context, cli groupDescriptionClient, requestedJID types.JID, description string) error {
+	targetJID, targetInfo, err := resolveGroupDescriptionTarget(ctx, cli, requestedJID)
+	if err != nil {
+		return err
+	}
+	if targetInfo.Topic == description {
+		return nil
+	}
+
+	newID := generateGroupDescriptionID(cli, targetInfo, description)
+	content := buildGroupDescriptionNode(description, targetInfo.TopicID, newID)
+	_, err = cli.sendGroupIQ(ctx, iqSet, targetJID, content)
+	if err == nil {
+		return nil
+	}
+	if !isIQErrorCode(err, 409) {
+		return fmt.Errorf("failed to update description for %s: %w", targetJID, err)
+	}
+
+	refreshedInfo, refreshErr := cli.getGroupInfo(ctx, targetJID, false)
+	if refreshErr != nil {
+		return fmt.Errorf("failed to refresh group info for %s after description conflict (%v): %w", targetJID, err, refreshErr)
+	}
+	if targetInfo.IsParent && !refreshedInfo.IsParent {
+		return fmt.Errorf("resolved community parent %s is no longer marked as a parent", targetJID)
+	}
+	if refreshedInfo.Topic == description {
+		return nil
+	}
+
+	newID = generateGroupDescriptionID(cli, refreshedInfo, description)
+	content = buildGroupDescriptionNode(description, refreshedInfo.TopicID, newID)
+	if _, retryErr := cli.sendGroupIQ(ctx, iqSet, targetJID, content); retryErr != nil {
+		return fmt.Errorf("failed to update description for %s after refreshing conflict: %w", targetJID, retryErr)
+	}
+	return nil
+}
+
 func (cli *Client) sendGroupIQ(ctx context.Context, iqType infoQueryType, jid types.JID, content waBinary.Node) (*waBinary.Node, error) {
 	return cli.sendIQ(ctx, infoQuery{
 		Namespace: "w:g2",
@@ -1117,23 +1199,10 @@ func (cli *Client) SetGroupMemberAddMode(ctx context.Context, jid types.JID, mod
 	return err
 }
 
-// SetGroupDescription updates the group description.
+// SetGroupDescription updates the group description. If jid is the default
+// announcement group of a community, the description is updated on its parent.
 func (cli *Client) SetGroupDescription(ctx context.Context, jid types.JID, description string) error {
-	groupInfo, err := cli.getGroupInfo(ctx, jid, false)
-	if err != nil {
-		return err
-	}
-
-	var newID types.MessageID
-	if description != "" {
-		if groupInfo.IsParent {
-			newID = generateCommunityDescriptionID()
-		} else {
-			newID = cli.GenerateMessageID()
-		}
-	}
-
-	content := buildGroupDescriptionNode(description, groupInfo.TopicID, newID)
-	_, err = cli.sendGroupIQ(ctx, iqSet, jid, content)
-	return err
+	cli.groupDescriptionLock.Lock()
+	defer cli.groupDescriptionLock.Unlock()
+	return setGroupDescription(ctx, cli, jid, description)
 }
