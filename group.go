@@ -9,8 +9,12 @@ package whatsmeow
 import (
 	"cmp"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
+
+	"go.mau.fi/util/random"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/store"
@@ -19,6 +23,34 @@ import (
 )
 
 const InviteLinkPrefix = "https://chat.whatsapp.com/"
+
+// generateCommunityDescriptionID generates the legacy message ID format that
+// WhatsApp Web uses when updating community descriptions.
+func generateCommunityDescriptionID() types.MessageID {
+	return WebMessageIDPrefix + strings.ToUpper(hex.EncodeToString(random.Bytes(18)))
+}
+
+func buildGroupDescriptionNode(description, previousID string, newID types.MessageID) waBinary.Node {
+	attrs := waBinary.Attrs{}
+	var content any
+	if description != "" {
+		attrs["id"] = newID
+		content = []waBinary.Node{{
+			Tag:     "body",
+			Content: []byte(description),
+		}}
+	} else {
+		attrs["delete"] = "true"
+	}
+	if previousID != "" {
+		attrs["prev"] = previousID
+	}
+	return waBinary.Node{
+		Tag:     "description",
+		Attrs:   attrs,
+		Content: content,
+	}
+}
 
 func (cli *Client) sendGroupIQ(ctx context.Context, iqType infoQueryType, jid types.JID, content waBinary.Node) (*waBinary.Node, error) {
 	return cli.sendIQ(ctx, infoQuery{
@@ -1087,37 +1119,21 @@ func (cli *Client) SetGroupMemberAddMode(ctx context.Context, jid types.JID, mod
 
 // SetGroupDescription updates the group description.
 func (cli *Client) SetGroupDescription(ctx context.Context, jid types.JID, description string) error {
-	attrs := waBinary.Attrs{}
 	groupInfo, err := cli.getGroupInfo(ctx, jid, false)
 	if err != nil {
 		return err
 	}
 
+	var newID types.MessageID
 	if description != "" {
-		attrs["id"] = cli.GenerateMessageID()
-	} else {
-		attrs["delete"] = "true"
+		if groupInfo.IsParent {
+			newID = generateCommunityDescriptionID()
+		} else {
+			newID = cli.GenerateMessageID()
+		}
 	}
 
-	prev := groupInfo.TopicID
-	if prev != "" {
-		attrs["prev"] = prev
-	}
-
-	var contentNodes []waBinary.Node
-	if description != "" {
-		contentNodes = append(contentNodes, waBinary.Node{
-			Tag:     "body",
-			Content: []byte(description),
-		})
-	}
-
-	content := waBinary.Node{
-		Tag:     "description",
-		Attrs:   attrs,
-		Content: contentNodes,
-	}
-
+	content := buildGroupDescriptionNode(description, groupInfo.TopicID, newID)
 	_, err = cli.sendGroupIQ(ctx, iqSet, jid, content)
 	return err
 }
