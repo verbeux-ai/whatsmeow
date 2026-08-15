@@ -149,6 +149,9 @@ type ReqCreateGroup struct {
 	Name string
 	// You don't need to include your own JID in the participants array, the WhatsApp servers will add it implicitly.
 	Participants []types.JID
+	// Description is included atomically when creating a community parent.
+	// Normal groups should continue using SetGroupDescription after creation.
+	Description string
 
 	types.GroupEphemeral
 	types.GroupAnnounce
@@ -162,16 +165,74 @@ type ReqCreateGroup struct {
 	types.GroupLinkedParent
 }
 
+func appendCreateGroupSettings(nodes []waBinary.Node, req ReqCreateGroup) []waBinary.Node {
+	if req.IsParent {
+		if req.Description != "" {
+			nodes = append(nodes, buildGroupDescriptionNode(req.Description, "", generateCommunityDescriptionID()))
+		}
+		if req.DefaultMembershipApprovalMode == "" {
+			req.DefaultMembershipApprovalMode = "request_required"
+		}
+		nodes = append(nodes, waBinary.Node{
+			Tag: "parent",
+			Attrs: waBinary.Attrs{
+				"default_membership_approval_mode": req.DefaultMembershipApprovalMode,
+			},
+		})
+	} else {
+		// TODO member_share_group_history_mode
+		nodes = append(nodes, waBinary.Node{
+			Tag:     "member_add_mode",
+			Content: string(cmp.Or(req.MemberAddMode, types.GroupMemberAddModeAllMember)),
+		})
+		if !req.LinkedParentJID.IsEmpty() {
+			nodes = append(nodes, waBinary.Node{
+				Tag:   "linked_parent",
+				Attrs: waBinary.Attrs{"jid": req.LinkedParentJID},
+			})
+		}
+	}
+	if req.IsLocked {
+		nodes = append(nodes, waBinary.Node{Tag: "locked"})
+	}
+	if req.IsAnnounce {
+		nodes = append(nodes, waBinary.Node{Tag: "announcement"})
+	}
+	if req.IsParent {
+		return nodes
+	}
+	if req.IsEphemeral {
+		nodes = append(nodes, waBinary.Node{
+			Tag: "ephemeral",
+			Attrs: waBinary.Attrs{
+				"expiration": req.DisappearingTimer,
+				"trigger":    "1", // TODO what's this?
+			},
+		})
+	} else {
+		nodes = append(nodes, waBinary.Node{
+			Tag:   "ephemeral",
+			Attrs: waBinary.Attrs{"expiration": 0},
+		})
+	}
+	approvalState := "off"
+	if req.IsJoinApprovalRequired {
+		approvalState = "on"
+	}
+	return append(nodes, waBinary.Node{
+		Tag: "membership_approval_mode",
+		Content: []waBinary.Node{{
+			Tag:   "group_join",
+			Attrs: waBinary.Attrs{"state": approvalState},
+		}},
+	})
+}
+
 // CreateGroup creates a group on WhatsApp with the given name and participants.
 //
 // See ReqCreateGroup for parameters.
 func (cli *Client) CreateGroup(ctx context.Context, req ReqCreateGroup) (*types.GroupInfo, error) {
-	participantNodes := make([]waBinary.Node, len(req.Participants), len(req.Participants)+1)
-	// TODO member_share_group_history_mode
-	participantNodes = append(participantNodes, waBinary.Node{
-		Tag:     "member_add_mode",
-		Content: string(cmp.Or(req.MemberAddMode, types.GroupMemberAddModeAllMember)),
-	})
+	participantNodes := make([]waBinary.Node, len(req.Participants), len(req.Participants)+6)
 	for i, participant := range req.Participants {
 		participant = participant.ToNonAD()
 		var participantPN types.JID
@@ -200,53 +261,7 @@ func (cli *Client) CreateGroup(ctx context.Context, req ReqCreateGroup) (*types.
 			}}
 		}
 	}
-	if req.IsParent {
-		if req.DefaultMembershipApprovalMode == "" {
-			req.DefaultMembershipApprovalMode = "request_required"
-		}
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag: "parent",
-			Attrs: waBinary.Attrs{
-				"default_membership_approval_mode": req.DefaultMembershipApprovalMode,
-			},
-		})
-	} else if !req.LinkedParentJID.IsEmpty() {
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag:   "linked_parent",
-			Attrs: waBinary.Attrs{"jid": req.LinkedParentJID},
-		})
-	}
-	if req.IsLocked {
-		participantNodes = append(participantNodes, waBinary.Node{Tag: "locked"})
-	}
-	if req.IsAnnounce {
-		participantNodes = append(participantNodes, waBinary.Node{Tag: "announcement"})
-	}
-	if req.IsEphemeral {
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag: "ephemeral",
-			Attrs: waBinary.Attrs{
-				"expiration": req.DisappearingTimer,
-				"trigger":    "1", // TODO what's this?
-			},
-		})
-	} else {
-		participantNodes = append(participantNodes, waBinary.Node{
-			Tag:   "ephemeral",
-			Attrs: waBinary.Attrs{"expiration": 0},
-		})
-	}
-	approvalState := "off"
-	if req.IsJoinApprovalRequired {
-		approvalState = "on"
-	}
-	participantNodes = append(participantNodes, waBinary.Node{
-		Tag: "membership_approval_mode",
-		Content: []waBinary.Node{{
-			Tag:   "group_join",
-			Attrs: waBinary.Attrs{"state": approvalState},
-		}},
-	})
+	participantNodes = appendCreateGroupSettings(participantNodes, req)
 	createAttrs := waBinary.Attrs{}
 	if req.Name != "" {
 		createAttrs["subject"] = req.Name
