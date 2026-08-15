@@ -335,6 +335,10 @@ const (
 
 // UpdateGroupParticipants can be used to add, remove, promote and demote members in a WhatsApp group.
 func (cli *Client) UpdateGroupParticipants(ctx context.Context, jid types.JID, participantChanges []types.JID, action ParticipantChange) ([]types.GroupParticipant, error) {
+	return cli.updateGroupParticipants(ctx, jid, participantChanges, action, nil)
+}
+
+func (cli *Client) updateGroupParticipants(ctx context.Context, jid types.JID, participantChanges []types.JID, action ParticipantChange, actionAttrs waBinary.Attrs) ([]types.GroupParticipant, error) {
 	content := make([]waBinary.Node, len(participantChanges))
 	for i, participantJID := range participantChanges {
 		content[i] = waBinary.Node{
@@ -363,6 +367,7 @@ func (cli *Client) UpdateGroupParticipants(ctx context.Context, jid types.JID, p
 	}
 	resp, err := cli.sendGroupIQ(ctx, iqSet, jid, waBinary.Node{
 		Tag:     string(action),
+		Attrs:   actionAttrs,
 		Content: content,
 	})
 	if err != nil {
@@ -378,6 +383,68 @@ func (cli *Client) UpdateGroupParticipants(ctx context.Context, jid types.JID, p
 		participants[i] = parseParticipant(child.AttrGetter(), &child)
 	}
 	return participants, nil
+}
+
+type communityParticipantUpdater interface {
+	GetSubGroups(context.Context, types.JID) ([]*types.GroupLinkTarget, error)
+	updateGroupParticipants(context.Context, types.JID, []types.JID, ParticipantChange, waBinary.Attrs) ([]types.GroupParticipant, error)
+}
+
+func updateCommunityParticipants(ctx context.Context, cli communityParticipantUpdater, community types.JID, participantChanges []types.JID, action ParticipantChange) ([]types.GroupParticipant, error) {
+	target := community
+	var actionAttrs waBinary.Attrs
+
+	switch action {
+	case ParticipantChangeAdd:
+		subGroups, err := cli.GetSubGroups(ctx, community)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get announcement group for community %s: %w", community, err)
+		}
+		for _, subGroup := range subGroups {
+			if subGroup != nil && subGroup.IsDefaultSubGroup && !subGroup.JID.IsEmpty() {
+				target = subGroup.JID
+				break
+			}
+		}
+		if target == community {
+			return nil, fmt.Errorf("community %s has no announcement group", community)
+		}
+	case ParticipantChangeRemove:
+		actionAttrs = waBinary.Attrs{"linked_groups": "true"}
+	}
+
+	return cli.updateGroupParticipants(ctx, target, participantChanges, action, actionAttrs)
+}
+
+// UpdateCommunityParticipants can be used to add, remove, promote and demote members in a community.
+// The community parameter must be the parent community JID. Adds are sent to the announcement group,
+// while removals, promotions and demotions are sent to the parent. Removals also apply to linked groups.
+func (cli *Client) UpdateCommunityParticipants(ctx context.Context, community types.JID, participantChanges []types.JID, action ParticipantChange) ([]types.GroupParticipant, error) {
+	return updateCommunityParticipants(ctx, cli, community, participantChanges, action)
+}
+
+type communityAwareParticipantUpdater interface {
+	getCachedGroupData(context.Context, types.JID) (*groupMetaCache, error)
+	UpdateGroupParticipants(context.Context, types.JID, []types.JID, ParticipantChange) ([]types.GroupParticipant, error)
+	UpdateCommunityParticipants(context.Context, types.JID, []types.JID, ParticipantChange) ([]types.GroupParticipant, error)
+}
+
+func updateGroupParticipantsWithCommunity(ctx context.Context, cli communityAwareParticipantUpdater, jid types.JID, participantChanges []types.JID, action ParticipantChange) ([]types.GroupParticipant, error) {
+	groupData, err := cli.getCachedGroupData(ctx, jid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get group metadata before updating participants in %s: %w", jid, err)
+	}
+	if groupData.CommunityParent {
+		return cli.UpdateCommunityParticipants(ctx, jid, participantChanges, action)
+	}
+	return cli.UpdateGroupParticipants(ctx, jid, participantChanges, action)
+}
+
+// UpdateGroupParticipantsWithCommunity updates participants in a group or community parent.
+// Community parent JIDs use the community-specific protocol, while ordinary groups and linked
+// groups retain the behavior of UpdateGroupParticipants. Cached metadata is used when available.
+func (cli *Client) UpdateGroupParticipantsWithCommunity(ctx context.Context, jid types.JID, participantChanges []types.JID, action ParticipantChange) ([]types.GroupParticipant, error) {
+	return updateGroupParticipantsWithCommunity(ctx, cli, jid, participantChanges, action)
 }
 
 // GetGroupRequestParticipants gets the list of participants that have requested to join the group.
@@ -779,6 +846,7 @@ func (cli *Client) cacheGroupInfo(groupInfo *types.GroupInfo, lock bool) ([]stor
 	cli.groupCache[groupInfo.JID] = &groupMetaCache{
 		AddressingMode:             groupInfo.AddressingMode,
 		CommunityAnnouncementGroup: groupInfo.IsAnnounce && groupInfo.IsDefaultSubGroup,
+		CommunityParent:            groupInfo.IsParent,
 		Members:                    participants,
 	}
 	return lidPairs, redactedPhones
