@@ -217,6 +217,7 @@ type Client struct {
 type groupMetaCache struct {
 	AddressingMode             types.AddressingMode
 	CommunityAnnouncementGroup bool
+	CommunityParent            bool
 	Members                    []types.JID
 }
 
