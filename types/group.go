@@ -17,6 +17,13 @@ const (
 	GroupMemberAddModeAllMember GroupMemberAddMode = "all_member_add"
 )
 
+type CommunityGroupAddMode string
+
+const (
+	CommunityGroupAddModeAdmin     CommunityGroupAddMode = "admin_add"
+	CommunityGroupAddModeAllMember CommunityGroupAddMode = "all_member_add"
+)
+
 // GroupInfo contains basic information about a group chat on WhatsApp.
 type GroupInfo struct {
 	JID      JID
@@ -56,6 +63,7 @@ type GroupMembershipApprovalMode struct {
 type GroupParent struct {
 	IsParent                      bool
 	DefaultMembershipApprovalMode string // request_required
+	AllowNonAdminSubGroupCreation bool
 }
 
 type GroupLinkedParent struct {

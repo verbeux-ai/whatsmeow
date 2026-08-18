@@ -980,6 +980,8 @@ func (cli *Client) parseGroupNode(groupNode *waBinary.Node) (*types.GroupInfo, e
 		case "parent":
 			group.IsParent = true
 			group.DefaultMembershipApprovalMode = childAG.OptionalString("default_membership_approval_mode")
+		case "allow_non_admin_sub_group_creation":
+			group.AllowNonAdminSubGroupCreation = true
 		case "incognito":
 			group.IsIncognito = true
 		case "membership_approval_mode":
@@ -1280,6 +1282,29 @@ func (cli *Client) SetGroupMemberAddMode(ctx context.Context, jid types.JID, mod
 
 	_, err := cli.sendGroupIQ(ctx, iqSet, jid, content)
 	return err
+}
+
+type communityGroupAddModeClient interface {
+	sendGroupIQ(context.Context, infoQueryType, types.JID, waBinary.Node) (*waBinary.Node, error)
+}
+
+func setCommunityGroupAddMode(ctx context.Context, cli communityGroupAddModeClient, jid types.JID, mode types.CommunityGroupAddMode) error {
+	tag := "not_allow_non_admin_sub_group_creation"
+	switch mode {
+	case types.CommunityGroupAddModeAdmin:
+	case types.CommunityGroupAddModeAllMember:
+		tag = "allow_non_admin_sub_group_creation"
+	default:
+		return errors.New("invalid mode, must be 'admin_add' or 'all_member_add'")
+	}
+
+	_, err := cli.sendGroupIQ(ctx, iqSet, jid, waBinary.Node{Tag: tag})
+	return err
+}
+
+// SetCommunityGroupAddMode controls whether non-admin community members can add subgroups.
+func (cli *Client) SetCommunityGroupAddMode(ctx context.Context, jid types.JID, mode types.CommunityGroupAddMode) error {
+	return setCommunityGroupAddMode(ctx, cli, jid, mode)
 }
 
 // SetGroupDescription updates the group description. If jid is the default
