@@ -336,7 +336,7 @@ func shouldRetryMediaDownload(err error) bool {
 }
 
 func (cli *Client) downloadPossiblyEncryptedMediaWithRetries(ctx context.Context, url string, checksum []byte) (file, mac []byte, err error) {
-	for retryNum := 0; retryNum < 5; retryNum++ {
+	for retryNum := range 5 {
 		if checksum == nil {
 			file, err = cli.downloadMedia(ctx, url)
 		} else {
@@ -346,8 +346,7 @@ func (cli *Client) downloadPossiblyEncryptedMediaWithRetries(ctx context.Context
 			return
 		}
 		retryDuration := time.Duration(retryNum+1) * time.Second
-		var httpErr DownloadHTTPError
-		if errors.As(err, &httpErr) {
+		if httpErr, ok := errors.AsType[DownloadHTTPError](err); ok {
 			retryDuration = retryafter.Parse(httpErr.Response.Header.Get("Retry-After"), retryDuration)
 		}
 		cli.Log.Warnf("Failed to download media due to network error: %v, retrying in %s...", err, retryDuration)
@@ -361,6 +360,9 @@ func (cli *Client) downloadPossiblyEncryptedMediaWithRetries(ctx context.Context
 }
 
 func (cli *Client) doMediaDownloadRequest(ctx context.Context, url string) (*http.Response, error) {
+	if cli == nil {
+		return nil, ErrClientIsNil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare request: %w", err)
